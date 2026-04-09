@@ -452,28 +452,32 @@ func (r *PeerRotation) CertificateType() pki.CertificateType {
 }
 
 func (r *PeerRotation) NewCertificate(signer *crypto.CA, validity time.Duration, keyGen crypto.KeyPairGenerator) (*crypto.TLSCertificateConfig, error) {
+	if r.UserInfo == nil {
+		return nil, fmt.Errorf("PeerRotation requires UserInfo for configurable PKI certificates")
+	}
+
 	hostnames := r.Hostnames()
 	if len(hostnames) == 0 {
 		return nil, fmt.Errorf("no hostnames set")
 	}
-	if keyGen != nil {
-		if r.UserInfo == nil {
-			return nil, fmt.Errorf("PeerRotation requires UserInfo for configurable PKI certificates")
+
+	if keyGen == nil {
+		// Legacy path: use server cert template with extension fn to add both ExtKeyUsages.
+		// The subject CN comes from the first hostname (preserves current behavior).
+		peerExtFn := func(cert *x509.Certificate) error {
+			cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+			return nil
 		}
-		return signer.NewPeerCertificate(
-			sets.New(hostnames...), r.UserInfo, keyGen,
-			crypto.WithLifetime(validity),
-			crypto.WithExtensions(r.CertificateExtensionFn...),
-		)
+		extensions := append(append([]crypto.CertificateExtensionFunc{}, r.CertificateExtensionFn...), peerExtFn)
+
+		return signer.MakeServerCertForDuration(sets.New(hostnames...), validity, extensions...)
 	}
-	// Legacy path: use server cert template with extension fn to add both ExtKeyUsages.
-	// The subject CN comes from the first hostname (preserves current behavior).
-	peerExtFn := func(cert *x509.Certificate) error {
-		cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
-		return nil
-	}
-	extensions := append(append([]crypto.CertificateExtensionFunc{}, r.CertificateExtensionFn...), peerExtFn)
-	return signer.MakeServerCertForDuration(sets.New(hostnames...), validity, extensions...)
+
+	return signer.NewPeerCertificate(
+		sets.New(hostnames...), r.UserInfo, keyGen,
+		crypto.WithLifetime(validity),
+		crypto.WithExtensions(r.CertificateExtensionFn...),
+	)
 }
 
 func (r *PeerRotation) RecheckChannel() <-chan struct{} {
