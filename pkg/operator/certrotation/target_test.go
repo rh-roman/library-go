@@ -3,6 +3,7 @@ package certrotation
 import (
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -705,140 +706,109 @@ func TestNeedNewTargetCertKeyPair(t *testing.T) {
 	}
 }
 
-func TestClientRotation_NewCertificate_WithKeyPairGenerator(t *testing.T) {
-	testCases := []struct {
+func TestTargetRotation_NewCertificate_WithKeyPairGenerator(t *testing.T) {
+	rotationTypes := []struct {
+		name         string
+		rotation     TargetCertCreator
+		validateCert func(t *testing.T, certConfig *crypto.TLSCertificateConfig)
+	}{
+		{
+			name:         "ClientRotation",
+			rotation:     &ClientRotation{UserInfo: &user.DefaultInfo{Name: "test-user", Groups: []string{"test-group"}}},
+			validateCert: validateClientCert,
+		},
+		{
+			name:         "ServingRotation",
+			rotation:     &ServingRotation{Hostnames: func() []string { return []string{"localhost", "127.0.0.1"} }},
+			validateCert: validateServingCert,
+		},
+		{
+			name:         "SignerRotation",
+			rotation:     &SignerRotation{SignerName: "test-intermediate"},
+			validateCert: validateSignerCert,
+		},
+		{
+			name:         "PeerRotation",
+			rotation:     &PeerRotation{Hostnames: func() []string { return []string{"localhost", "127.0.0.1"} }, UserInfo: &user.DefaultInfo{Name: "test-user", Groups: []string{"test-group"}}},
+			validateCert: validatePeerCert,
+		},
+	}
+
+	keyGenTypes := []struct {
 		name    string
 		keyGen  crypto.KeyPairGenerator
 		wantAlg x509.PublicKeyAlgorithm
 	}{
-		{
-			name:    "nil uses legacy RSA",
-			keyGen:  nil,
-			wantAlg: x509.RSA,
-		},
-		{
-			name:    "RSA-4096",
-			keyGen:  crypto.RSAKeyPairGenerator{Bits: 4096},
-			wantAlg: x509.RSA,
-		},
-		{
-			name:    "ECDSA-P256",
-			keyGen:  crypto.ECDSAKeyPairGenerator{Curve: crypto.P256},
-			wantAlg: x509.ECDSA,
-		},
+		{name: "nil uses legacy RSA", keyGen: nil, wantAlg: x509.RSA},
+		{name: "RSA-4096", keyGen: crypto.RSAKeyPairGenerator{Bits: 4096}, wantAlg: x509.RSA},
+		{name: "ECDSA-P256", keyGen: crypto.ECDSAKeyPairGenerator{Curve: crypto.P256}, wantAlg: x509.ECDSA},
+		{name: "ECDSA-P384", keyGen: crypto.ECDSAKeyPairGenerator{Curve: crypto.P384}, wantAlg: x509.ECDSA},
 	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ca, err := newTestCACertificate(pkix.Name{CommonName: "test-ca"}, int64(1), metav1.Duration{Duration: time.Hour * 24}, time.Now)
-			if err != nil {
-				t.Fatal(err)
-			}
 
-			r := &ClientRotation{
-				UserInfo: &user.DefaultInfo{Name: "test-user", Groups: []string{"test-group"}},
-			}
-			certConfig, err := r.NewCertificate(ca, time.Hour, tc.keyGen)
-			if err != nil {
-				t.Fatalf("NewCertificate() error = %v", err)
-			}
+	for _, rt := range rotationTypes {
+		t.Run(rt.name, func(t *testing.T) {
+			for _, kt := range keyGenTypes {
+				t.Run(kt.name, func(t *testing.T) {
+					ca, err := newTestCACertificate(pkix.Name{CommonName: "test-ca"}, int64(1), metav1.Duration{Duration: time.Hour * 24}, time.Now)
+					if err != nil {
+						t.Fatal(err)
+					}
 
-			cert := certConfig.Certs[0]
-			if cert.PublicKeyAlgorithm != tc.wantAlg {
-				t.Errorf("PublicKeyAlgorithm = %v, want %v", cert.PublicKeyAlgorithm, tc.wantAlg)
-			}
-			if cert.Subject.CommonName != "test-user" {
-				t.Errorf("CN = %q, want %q", cert.Subject.CommonName, "test-user")
+					certConfig, err := rt.rotation.NewCertificate(ca, time.Hour, kt.keyGen)
+					if err != nil {
+						t.Fatalf("NewCertificate() error = %v", err)
+					}
+
+					cert := certConfig.Certs[0]
+					if cert.PublicKeyAlgorithm != kt.wantAlg {
+						t.Errorf("PublicKeyAlgorithm = %v, want %v", cert.PublicKeyAlgorithm, kt.wantAlg)
+					}
+
+					if rt.validateCert != nil {
+						rt.validateCert(t, certConfig)
+					}
+				})
 			}
 		})
 	}
 }
 
-func TestServingRotation_NewCertificate_WithKeyPairGenerator(t *testing.T) {
-	testCases := []struct {
-		name    string
-		keyGen  crypto.KeyPairGenerator
-		wantAlg x509.PublicKeyAlgorithm
-	}{
-		{
-			name:    "nil uses legacy RSA",
-			keyGen:  nil,
-			wantAlg: x509.RSA,
-		},
-		{
-			name:    "ECDSA-P256",
-			keyGen:  crypto.ECDSAKeyPairGenerator{Curve: crypto.P256},
-			wantAlg: x509.ECDSA,
-		},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ca, err := newTestCACertificate(pkix.Name{CommonName: "test-ca"}, int64(1), metav1.Duration{Duration: time.Hour * 24}, time.Now)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			r := &ServingRotation{
-				Hostnames: func() []string { return []string{"localhost", "127.0.0.1"} },
-			}
-			certConfig, err := r.NewCertificate(ca, time.Hour, tc.keyGen)
-			if err != nil {
-				t.Fatalf("NewCertificate() error = %v", err)
-			}
-
-			cert := certConfig.Certs[0]
-			if cert.PublicKeyAlgorithm != tc.wantAlg {
-				t.Errorf("PublicKeyAlgorithm = %v, want %v", cert.PublicKeyAlgorithm, tc.wantAlg)
-			}
-			if len(cert.DNSNames) == 0 {
-				t.Error("expected DNS SANs")
-			}
-		})
+func validateClientCert(t *testing.T, certConfig *crypto.TLSCertificateConfig) {
+	cert := certConfig.Certs[0]
+	if cert.Subject.CommonName != "test-user" {
+		t.Errorf("CN = %q, want %q", cert.Subject.CommonName, "test-user")
 	}
 }
 
-func TestSignerRotation_NewCertificate_WithKeyPairGenerator(t *testing.T) {
-	testCases := []struct {
-		name    string
-		keyGen  crypto.KeyPairGenerator
-		wantAlg x509.PublicKeyAlgorithm
-	}{
-		{
-			name:    "nil uses legacy RSA",
-			keyGen:  nil,
-			wantAlg: x509.RSA,
-		},
-		{
-			name:    "ECDSA-P384",
-			keyGen:  crypto.ECDSAKeyPairGenerator{Curve: crypto.P384},
-			wantAlg: x509.ECDSA,
-		},
+func validateServingCert(t *testing.T, certConfig *crypto.TLSCertificateConfig) {
+	cert := certConfig.Certs[0]
+	if len(cert.DNSNames) == 0 {
+		t.Error("expected DNS SANs")
 	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			ca, err := newTestCACertificate(pkix.Name{CommonName: "test-ca"}, int64(1), metav1.Duration{Duration: time.Hour * 24}, time.Now)
-			if err != nil {
-				t.Fatal(err)
-			}
+}
 
-			r := &SignerRotation{
-				SignerName: "test-intermediate",
-			}
-			certConfig, err := r.NewCertificate(ca, time.Hour, tc.keyGen)
-			if err != nil {
-				t.Fatalf("NewCertificate() error = %v", err)
-			}
+func validateSignerCert(t *testing.T, certConfig *crypto.TLSCertificateConfig) {
+	cert := certConfig.Certs[0]
+	if !cert.IsCA {
+		t.Error("expected IsCA to be true")
+	}
+	// Cert chain should include both the intermediate and the parent CA
+	if len(certConfig.Certs) < 2 {
+		t.Errorf("expected cert chain with at least 2 certs, got %d", len(certConfig.Certs))
+	}
+}
 
-			cert := certConfig.Certs[0]
-			if cert.PublicKeyAlgorithm != tc.wantAlg {
-				t.Errorf("PublicKeyAlgorithm = %v, want %v", cert.PublicKeyAlgorithm, tc.wantAlg)
-			}
-			if !cert.IsCA {
-				t.Error("expected IsCA to be true")
-			}
-			// Cert chain should include both the intermediate and the parent CA
-			if len(certConfig.Certs) < 2 {
-				t.Errorf("expected cert chain with at least 2 certs, got %d", len(certConfig.Certs))
-			}
-		})
+func validatePeerCert(t *testing.T, certConfig *crypto.TLSCertificateConfig) {
+	cert := certConfig.Certs[0]
+
+	if !slices.Contains(cert.ExtKeyUsage, x509.ExtKeyUsageClientAuth) {
+		t.Error("expected ExtKeyUsageClientAuth")
+	}
+	if !slices.Contains(cert.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
+		t.Error("expected ExtKeyUsageServerAuth")
+	}
+
+	if len(cert.DNSNames) == 0 {
+		t.Error("expected DNS SANs")
 	}
 }
